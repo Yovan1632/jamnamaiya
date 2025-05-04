@@ -1,0 +1,414 @@
+package com.example.receipt.controller;
+
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.time.LocalDate;
+import java.util.ArrayList;
+import java.util.List;
+
+import org.apache.poi.xwpf.usermodel.XWPFDocument;
+import org.apache.poi.xwpf.usermodel.XWPFParagraph;
+import org.apache.poi.xwpf.usermodel.XWPFRun;
+import org.apache.poi.xwpf.usermodel.ParagraphAlignment;
+import org.springframework.core.io.Resource;
+import org.springframework.core.io.UrlResource;
+import org.springframework.data.jpa.domain.Specification;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
+import org.springframework.util.ResourceUtils;
+import org.springframework.web.bind.annotation.*;
+
+import com.example.receipt.model.ReceiptData;
+import com.example.receipt.dto.ReceiptRequest;
+import com.example.receipt.dto.ReceiptResponse;
+import com.example.receipt.repository.ReceiptRepository;
+import com.example.receipt.util.ChallanNumberManager;
+
+@RestController
+@RequestMapping("/api/receipts")
+@CrossOrigin(origins = "http://localhost:4200")
+public class ReceiptController {
+
+    private final ReceiptRepository receiptRepository;
+    private final ChallanNumberManager challanNumberManager;
+    private static final String OUTPUT_DIR = "D:\\JMI_TEST";
+    private static final String TEMPLATE_NAME = "Jamanamaiya_Ice_Receipt.docx";
+    private static final String VENDOR_CODE = "0003818642";
+    private static final String HSN_CODE = "22019010";
+    private static final String GSTIN = "GSTIN - 24AABFJ5334M1ZC";
+    private static final String M_NO = "M.No: 9227499500/8000102030";
+    private static final String COMPANY_ADDRESS = "244, G.I.D.C., Porbandar - 360 577";
+    private static final String COMPANY_NAME = "Reliance Industries Ltd. RIL complex (polysilicon factory) vill: Meghpar, P.O Motikhavdi, Jamnagar";
+
+    public ReceiptController(ReceiptRepository receiptRepository, ChallanNumberManager challanNumberManager) {
+        this.receiptRepository = receiptRepository;
+        this.challanNumberManager = challanNumberManager;
+    }
+
+    @GetMapping
+    public List<ReceiptResponse> getAllReceipts(
+            @RequestParam(required = false) String challanNo,
+            @RequestParam(required = false) LocalDate startDate,
+            @RequestParam(required = false) LocalDate endDate) {
+
+        Specification<ReceiptData> spec = Specification.where(null);
+
+        if (challanNo != null && !challanNo.isEmpty()) {
+            spec = spec.and((root, query, cb) -> cb.equal(root.get("challanNo"), challanNo));
+        }
+
+        List<ReceiptData> receipts = receiptRepository.findAll(spec);
+        List<ReceiptResponse> response = new ArrayList<>();
+
+        for (ReceiptData receipt : receipts) {
+            ReceiptResponse dto = new ReceiptResponse();
+            dto.setId(receipt.getId());
+            dto.setChallanNo(receipt.getChallanNo());
+            dto.setName(receipt.getName());
+            dto.setAsnCode(receipt.getAsnCode());
+            dto.setScnCode(receipt.getScnCode());
+            dto.setVehicleNo(receipt.getVehicleNo());
+            dto.setIceSlabs(receipt.getIceSlabs());
+            dto.setOrderNo(receipt.getOrderNo());
+            response.add(dto);
+        }
+
+        return response;
+    }
+
+    @PostMapping("/generate")
+    public ResponseEntity<Resource> generateReceipt(@RequestBody ReceiptRequest request) throws IOException {
+        try {
+            System.out.println("Starting receipt generation...");
+            System.out.println("Request data: " + request.toString());
+
+            // Create receipt data
+            ReceiptData receiptData = new ReceiptData();
+            receiptData.setName(COMPANY_NAME);
+            receiptData.setAsnCode(request.getAsnCode());
+            receiptData.setScnCode(request.getScnCode());
+            receiptData.setVehicleNo(request.getVehicleNo());
+            receiptData.setIceSlabs(request.getIceSlabs());
+            receiptData.setOrderNo(request.getOrderNo());
+
+            // Generate challan number
+            String challanNo = challanNumberManager.getNextChallanNumber();
+            System.out.println("Generated challan number: " + challanNo);
+            receiptData.setChallanNo(challanNo);
+
+            // Create output directory if it doesn't exist
+            Path outputPath = Paths.get(OUTPUT_DIR);
+            if (!Files.exists(outputPath)) {
+                Files.createDirectories(outputPath);
+                System.out.println("Created output directory: " + outputPath);
+            }
+
+            // Read the template from classpath
+            System.out.println("Attempting to read template file: /templates/" + TEMPLATE_NAME);
+            InputStream templateStream = getClass().getResourceAsStream("/templates/" + TEMPLATE_NAME);
+            if (templateStream == null) {
+                System.err.println("Template file not found in classpath!");
+                throw new IOException("Template file not found in classpath: " + TEMPLATE_NAME);
+            }
+            System.out.println("Successfully loaded template file");
+
+            // Create the document
+            XWPFDocument doc = new XWPFDocument(templateStream);
+            templateStream.close();
+
+            // Get current date
+            LocalDate currentDate = LocalDate.now();
+            String formattedDate = currentDate.format(java.time.format.DateTimeFormatter.ofPattern("dd/MM/yyyy"));
+
+            // Replace placeholders with actual values
+            for (XWPFParagraph paragraph : doc.getParagraphs()) {
+                List<XWPFRun> runs = paragraph.getRuns();
+                if (runs != null) {
+                    // First, get the complete text of the paragraph to check what we're dealing with
+                    String paragraphText = paragraph.getText();
+                    
+                    // Handle special cases for duplicate prevention
+                    if (paragraphText.contains("Vendor Code") && paragraphText.contains("HSN Code")) {
+                        // Clear existing runs
+                        while (paragraph.getRuns().size() > 0) {
+                            paragraph.removeRun(0);
+                        }
+                        // Create single run with correct format
+                        XWPFRun newRun = paragraph.createRun();
+                        newRun.setFontFamily("Times New Roman");
+                        newRun.setFontSize(12);
+                        newRun.setBold(true);
+                        newRun.setText("Vendor Code: " + VENDOR_CODE);
+                        
+                        // Add HSN Code on the right with proper spacing
+                        newRun = paragraph.createRun();
+                        newRun.setFontFamily("Times New Roman");
+                        newRun.setFontSize(12);
+                        newRun.setBold(true);
+                        
+                        newRun.addTab();
+                        newRun.addTab();
+                        newRun.setText("                                                                      HSN Code: " + HSN_CODE);
+                        continue;
+                    }
+                    
+                    if (paragraphText.contains("ASN Code") && paragraphText.contains("SCN Code")) {
+                        // Clear existing runs
+                        while (paragraph.getRuns().size() > 0) {
+                            paragraph.removeRun(0);
+                        }
+                        // Create single run with correct format
+                        XWPFRun newRun = paragraph.createRun();
+                        newRun.setFontFamily("Times New Roman");
+                        newRun.setFontSize(12);
+                        newRun.setBold(true);
+                        newRun.setText("ASN Code: " + receiptData.getAsnCode());
+                        
+                        // Add SCN Code on the right with proper spacing
+                        newRun = paragraph.createRun();
+                        newRun.setFontFamily("Times New Roman");
+                        newRun.setFontSize(12);
+                        newRun.setBold(true);
+                       
+                        newRun.addTab();
+                        newRun.addTab();
+                        newRun.setText("                                                                      SCN Code: " + receiptData.getScnCode());
+                        continue;
+                    }
+                    
+                    if (paragraphText.contains("Vehicle No") && paragraphText.contains("Ice Slabs")) {
+                        // Clear existing runs
+                        while (paragraph.getRuns().size() > 0) {
+                            paragraph.removeRun(0);
+                        }
+                        // Create single run with correct format
+                        XWPFRun newRun = paragraph.createRun();
+                        newRun.setFontFamily("Times New Roman");
+                        newRun.setFontSize(12);
+                        newRun.setBold(true);
+                        newRun.setText("Vehicle No.: " + receiptData.getVehicleNo());
+                        
+                        // Add Ice Slabs on the right with proper spacing
+                        newRun = paragraph.createRun();
+                        newRun.setFontFamily("Times New Roman");
+                        newRun.setFontSize(12);
+                        newRun.setBold(true);
+                        newRun.addTab();
+                        newRun.addTab();
+                        newRun.setText("                                                                      Ice Slabs: " + receiptData.getIceSlabs());
+                        continue;
+                    }
+
+                    if (paragraphText.contains("From :")) {
+                        // Clear existing runs
+                        while (paragraph.getRuns().size() > 0) {
+                            paragraph.removeRun(0);
+                        }
+                        // Create single run with correct format
+                        XWPFRun newRun = paragraph.createRun();
+                        newRun.setFontFamily("Times New Roman");
+                        newRun.setFontSize(12);
+                        newRun.setBold(true);
+                        newRun.setText("From : Jamanamaiya Ice");
+                        paragraph.setAlignment(ParagraphAlignment.RIGHT);
+                        continue;
+                    }
+
+                    if (paragraphText.contains("The above goods")) {
+                        // Clear existing runs
+                        while (paragraph.getRuns().size() > 0) {
+                            paragraph.removeRun(0);
+                        }
+                        // Create single run with correct format
+                        XWPFRun newRun = paragraph.createRun();
+                        newRun.setFontFamily("Times New Roman");
+                        newRun.setFontSize(12);
+                        newRun.setItalic(true);
+                        newRun.setBold(false);
+                        newRun.setText("The above goods is found in good stability.");
+                        paragraph.setAlignment(ParagraphAlignment.LEFT);
+                        continue;
+                    }
+
+                    // For other single-field cases
+                    for (XWPFRun run : runs) {
+                        String text = run.getText(0);
+                        if (text != null) {
+                            // Clean up the text first by removing extra underscores
+                            text = text.replaceAll("_+", "");
+                            
+                            // Replace placeholders with actual values
+                            if (text.contains("Chalan No")) { 
+                                text = "Chalan No. " + challanNo;
+                                run.setBold(true);
+                            }
+                            else if (text.contains("Date")) { 
+                                text = "Date: " + formattedDate;
+                                run.setBold(true);
+                            }
+                            else if (text.contains("Name:")) { 
+                                text = "Name: " + COMPANY_NAME;
+                                run.setBold(true);
+                            }
+                            else if (text.contains("Order No")) { 
+                                text = "Order No. (P.O.): " + (request.getOrderNo() != null ? request.getOrderNo() : "");
+                                run.setBold(true);
+                            }
+                            else if (text.contains("GSTIN")) {
+                                text = GSTIN;
+                                run.setBold(true);
+                            }
+                            else if (text.contains("M.No")) {
+                                text = M_NO;
+                                run.setBold(true);
+                            }
+                            else if (text.contains("Receiver's Signature")) { 
+                                text = "Receiver's Signature: _____________";
+                                run.setBold(true);
+                            }
+                            
+                            run.setText(text, 0);
+                        }
+                    }
+                }
+            }
+
+            // Save receipt data to database
+            System.out.println("Saving receipt data to database...");
+            receiptRepository.save(receiptData);
+
+            // Save the document
+            String dateForFileName = currentDate.format(java.time.format.DateTimeFormatter.ofPattern("dd_MM_yyyy"));
+            String outputFileName = OUTPUT_DIR + File.separator + "Receipt_" + challanNo + "_" + dateForFileName + ".docx";
+            System.out.println("Saving document to: " + outputFileName);
+            FileOutputStream out = new FileOutputStream(outputFileName);
+            doc.write(out);
+            out.close();
+            doc.close();
+
+            // Return the generated file
+            Path file = Paths.get(outputFileName);
+            Resource resource = new UrlResource(file.toUri());
+            System.out.println("Successfully generated receipt!");
+
+            return ResponseEntity.ok()
+                    .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + file.getFileName() + "\"")
+                    .contentType(MediaType.APPLICATION_OCTET_STREAM)
+                    .body(resource);
+
+        } catch (Exception e) {
+            System.err.println("Error generating receipt: " + e.getMessage());
+            e.printStackTrace();
+            throw new RuntimeException("Failed to generate receipt: " + e.getMessage(), e);
+        }
+    }
+
+    @GetMapping("/download/{challanNo}")
+    public ResponseEntity<Resource> downloadReceipt(@PathVariable String challanNo) throws IOException {
+        try {
+            // Find the receipt by challan number
+            ReceiptData receiptData = receiptRepository.findByChallanNo(challanNo)
+                    .orElseThrow(() -> new RuntimeException("Receipt not found with challan number: " + challanNo));
+
+            // Get current date
+            LocalDate currentDate = LocalDate.now();
+            String dateForFileName = currentDate.format(java.time.format.DateTimeFormatter.ofPattern("dd_MM_yyyy"));
+            String outputFileName = OUTPUT_DIR + File.separator + "Receipt_" + challanNo + "_" + dateForFileName + ".docx";
+
+            // Check if file already exists
+            Path file = Paths.get(outputFileName);
+            if (Files.exists(file)) {
+                Resource resource = new UrlResource(file.toUri());
+                return ResponseEntity.ok()
+                        .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + file.getFileName() + "\"")
+                        .contentType(MediaType.APPLICATION_OCTET_STREAM)
+                        .body(resource);
+            }
+
+            // If file doesn't exist, generate it
+            // Read the template
+            InputStream templateStream = getClass().getResourceAsStream("/templates/" + TEMPLATE_NAME);
+            if (templateStream == null) {
+                throw new IOException("Template file not found in classpath: " + TEMPLATE_NAME);
+            }
+
+            // Create the document
+            XWPFDocument doc = new XWPFDocument(templateStream);
+            templateStream.close();
+
+            // Format date for display
+            String formattedDate = currentDate.format(java.time.format.DateTimeFormatter.ofPattern("dd/MM/yyyy"));
+
+            // Replace placeholders with actual values
+            for (XWPFParagraph paragraph : doc.getParagraphs()) {
+                String paragraphText = paragraph.getText();
+                
+                // Only process paragraphs that contain our fields
+                if (paragraphText.contains("Chalan No.") || 
+                    paragraphText.contains("Date:") ||
+                    paragraphText.contains("ASN Code:") ||
+                    paragraphText.contains("SCN Code:") ||
+                    paragraphText.contains("Vehicle No.") ||
+                    paragraphText.contains("Ice Slabs:") ||
+                    paragraphText.contains("Order No. (P.O.):")) {
+                    
+                    // Clear existing runs to preserve formatting
+                    while (paragraph.getRuns().size() > 0) {
+                        paragraph.removeRun(0);
+                    }
+                    
+                    // Create new run with preserved formatting
+                    XWPFRun newRun = paragraph.createRun();
+                    newRun.setFontFamily("Times New Roman");
+                    newRun.setFontSize(12);
+                    newRun.setBold(true);  // Make text bold
+                    
+                    // Set the text based on which field it is
+                    if (paragraphText.contains("Chalan No.")) {
+                        newRun.setText("Chalan No. " + receiptData.getChallanNo());
+                    } else if (paragraphText.contains("Date:")) {
+                        newRun.setText("Date: " + formattedDate);
+                    } else if (paragraphText.contains("ASN Code:")) {
+                        newRun.setText("ASN Code: " + receiptData.getAsnCode());
+                    } else if (paragraphText.contains("SCN Code:")) {
+                        newRun.setText("SCN Code: " + receiptData.getScnCode());
+                    } else if (paragraphText.contains("Vehicle No.")) {
+                        newRun.setText("Vehicle No. " + receiptData.getVehicleNo());
+                    } else if (paragraphText.contains("Ice Slabs:")) {
+                        newRun.setText("Ice Slabs: " + receiptData.getIceSlabs());
+                    } else if (paragraphText.contains("Order No. (P.O.):")) {
+                        newRun.setText("Order No. (P.O.): " + (receiptData.getOrderNo() != null ? receiptData.getOrderNo() : ""));
+                    }
+                }
+            }
+
+            // Create output directory if it doesn't exist
+            Path outputPath = Paths.get(OUTPUT_DIR);
+            if (!Files.exists(outputPath)) {
+                Files.createDirectories(outputPath);
+            }
+
+            // Save the document
+            FileOutputStream out = new FileOutputStream(outputFileName);
+            doc.write(out);
+            out.close();
+            doc.close();
+
+            // Return the generated file
+            Resource resource = new UrlResource(file.toUri());
+            return ResponseEntity.ok()
+                    .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + file.getFileName() + "\"")
+                    .contentType(MediaType.APPLICATION_OCTET_STREAM)
+                    .body(resource);
+
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to download receipt: " + e.getMessage(), e);
+        }
+    }
+} 
